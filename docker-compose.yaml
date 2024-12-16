@@ -1,0 +1,26 @@
+# docker-compose.yml
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:latest
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: bookshop
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  api:
+    build: .
+    ports:
+      - "8080:8080"
+    depends_on:
+      - postgres
+    environment:
+      - DATABASE_URL=postgres://postgres:postgres@postgres:5432/bookshop?sslmode=disable
+
+volumes:
+  postgres_data:
