@@ -5,13 +5,12 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"log"
 	"net/http"
 	"os"
 
 	"github.com/gorilla/mux"
-	_ "github.com/lib/pq"
+	"github.com/lib/pq"
 )
 
 // Book represents the model for a book
@@ -54,6 +53,7 @@ func main() {
 	// Define routes
 	router.HandleFunc("/books", getBooks).Methods("GET")
 	router.HandleFunc("/books", createBook).Methods("POST")
+	router.HandleFunc("/books", updateBook).Methods("PUT") // ISBN query parameter route
 	router.HandleFunc("/books/{id}", getBook).Methods("GET")
 	router.HandleFunc("/books/{id}", updateBook).Methods("PUT")
 	router.HandleFunc("/books/{id}", deleteBook).Methods("DELETE")
@@ -69,6 +69,8 @@ func main() {
 
 // Handler functions
 func getBooks(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
 	var books []Book
 	rows, err := db.Query("select id, title, author, isbn from books")
 	if err != nil {
@@ -90,6 +92,8 @@ func getBooks(w http.ResponseWriter, _ *http.Request) {
 }
 
 func getBook(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
 	params := mux.Vars(r)
 	var book Book
 
@@ -129,18 +133,43 @@ func createBook(w http.ResponseWriter, r *http.Request) {
 }
 
 func updateBook(w http.ResponseWriter, r *http.Request) {
-	params := mux.Vars(r)
 	var book Book
 	if err := json.NewDecoder(r.Body).Decode(&book); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
-	result, err := db.Exec(
-		"update books set title = $1, author = $2, isbn = $3 where id = $4",
-		book.Title, book.Author, book.ISBN, params["id"],
-	)
+	var result sql.Result
+	var err error
+
+	// Check if ISBN query parameter exists
+	isbn := r.URL.Query().Get("isbn")
+	if isbn != "" {
+		// Update by ISBN
+		result, err = db.Exec(
+			"update books set title = $1, author = $2, isbn = $3 where isbn = $4",
+			book.Title, book.Author, book.ISBN, isbn,
+		)
+	} else {
+		// Update by ID
+		params := mux.Vars(r)
+		id := params["id"]
+		if id == "" {
+			http.Error(w, "Either ID in path or ISBN in query parameter is required", http.StatusBadRequest)
+			return
+		}
+		result, err = db.Exec(
+			"update books set title = $1, author = $2, isbn = $3 where id = $4",
+			book.Title, book.Author, book.ISBN, id,
+		)
+	}
+
 	if err != nil {
+		// Check for unique constraint violation on ISBN
+		if pqErr, ok := err.(*pq.Error); ok && pqErr.Code == "23505" {
+			http.Error(w, "Book with this ISBN already exists", http.StatusConflict)
+			return
+		}
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -156,8 +185,19 @@ func updateBook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	book.ID = parseInt(params["id"])
-	json.NewEncoder(w).Encode(book)
+	// Fetch the updated book to return the correct ID
+	var updatedBook Book
+	err = db.QueryRow(
+		"select id, title, author, isbn from books where isbn = $1",
+		book.ISBN,
+	).Scan(&updatedBook.ID, &updatedBook.Title, &updatedBook.Author, &updatedBook.ISBN)
+
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	json.NewEncoder(w).Encode(updatedBook)
 }
 
 func deleteBook(w http.ResponseWriter, r *http.Request) {
@@ -181,10 +221,4 @@ func deleteBook(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusNoContent)
-}
-
-func parseInt(s string) int {
-	i := 0
-	fmt.Sscanf(s, "%d", &i)
-	return i
 }
