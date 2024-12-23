@@ -5,12 +5,11 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"github.com/gorilla/mux"
+	"github.com/lib/pq"
 	"log"
 	"net/http"
 	"os"
-
-	"github.com/gorilla/mux"
-	"github.com/lib/pq"
 )
 
 // Book represents the model for a book
@@ -53,9 +52,10 @@ func main() {
 	// Define routes
 	router.HandleFunc("/books", getBooks).Methods("GET")
 	router.HandleFunc("/books", createBook).Methods("POST")
-	router.HandleFunc("/books", updateBook).Methods("PUT") // ISBN query parameter route
-	router.HandleFunc("/books/{id}", getBook).Methods("GET")
-	router.HandleFunc("/books/{id}", updateBook).Methods("PUT")
+	router.HandleFunc("/books/{id}", getBookByIdentifier).Methods("GET")
+	router.HandleFunc("/books/isbn/{isbn}", getBookByIdentifier).Methods("GET")
+	router.HandleFunc("/books/{id}", updateBookByIdentifier).Methods("PUT")
+	router.HandleFunc("/books/isbn/{isbn}", updateBookByIdentifier).Methods("PUT")
 	router.HandleFunc("/books/{id}", deleteBook).Methods("DELETE")
 
 	// Start server
@@ -91,14 +91,23 @@ func getBooks(w http.ResponseWriter, _ *http.Request) {
 	json.NewEncoder(w).Encode(books)
 }
 
-func getBook(w http.ResponseWriter, r *http.Request) {
+func getBookByIdentifier(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
 	params := mux.Vars(r)
 	var book Book
+	var err error
 
-	err := db.QueryRow("select id, title, author, isbn from books where id = $1",
-		params["id"]).Scan(&book.ID, &book.Title, &book.Author, &book.ISBN)
+	if isbn, ok := params["isbn"]; ok {
+		err = db.QueryRow("select id, title, author, isbn from books where isbn = $1",
+			isbn).Scan(&book.ID, &book.Title, &book.Author, &book.ISBN)
+	} else if id, ok := params["id"]; ok {
+		err = db.QueryRow("select id, title, author, isbn from books where id = $1",
+			id).Scan(&book.ID, &book.Title, &book.Author, &book.ISBN)
+	} else {
+		http.Error(w, "No identifier provided", http.StatusBadRequest)
+		return
+	}
 
 	if errors.Is(err, sql.ErrNoRows) {
 		http.Error(w, "Book not found", http.StatusNotFound)
@@ -132,36 +141,33 @@ func createBook(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(book)
 }
 
-func updateBook(w http.ResponseWriter, r *http.Request) {
+func updateBookByIdentifier(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	// Decode request body
 	var book Book
 	if err := json.NewDecoder(r.Body).Decode(&book); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
-	var result sql.Result
+	params := mux.Vars(r)
 	var err error
 
-	// Check if ISBN query parameter exists
-	isbn := r.URL.Query().Get("isbn")
-	if isbn != "" {
-		// Update by ISBN
-		result, err = db.Exec(
-			"update books set title = $1, author = $2, isbn = $3 where isbn = $4",
+	// Determine whether to update by ISBN or ID
+	if isbn, ok := params["isbn"]; ok {
+		err = db.QueryRow(
+			"update books set title = $1, author = $2, isbn = $3 where isbn = $4 returning id",
 			book.Title, book.Author, book.ISBN, isbn,
-		)
-	} else {
-		// Update by ID
-		params := mux.Vars(r)
-		id := params["id"]
-		if id == "" {
-			http.Error(w, "Either ID in path or ISBN in query parameter is required", http.StatusBadRequest)
-			return
-		}
-		result, err = db.Exec(
-			"update books set title = $1, author = $2, isbn = $3 where id = $4",
+		).Scan(&book.ID)
+	} else if id, ok := params["id"]; ok {
+		err = db.QueryRow(
+			"update books set title = $1, author = $2, isbn = $3 where id = $4 returning id",
 			book.Title, book.Author, book.ISBN, id,
-		)
+		).Scan(&book.ID)
+	} else {
+		http.Error(w, "No identifier provided", http.StatusBadRequest)
+		return
 	}
 
 	if err != nil {
@@ -170,34 +176,15 @@ func updateBook(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Book with this ISBN already exists", http.StatusConflict)
 			return
 		}
+		if errors.Is(err, sql.ErrNoRows) {
+			http.Error(w, "Book not found", http.StatusNotFound)
+			return
+		}
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	rowsAffected, err := result.RowsAffected()
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	if rowsAffected == 0 {
-		http.Error(w, "Book not found", http.StatusNotFound)
-		return
-	}
-
-	// Fetch the updated book to return the correct ID
-	var updatedBook Book
-	err = db.QueryRow(
-		"select id, title, author, isbn from books where isbn = $1",
-		book.ISBN,
-	).Scan(&updatedBook.ID, &updatedBook.Title, &updatedBook.Author, &updatedBook.ISBN)
-
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	json.NewEncoder(w).Encode(updatedBook)
+	json.NewEncoder(w).Encode(book)
 }
 
 func deleteBook(w http.ResponseWriter, r *http.Request) {
